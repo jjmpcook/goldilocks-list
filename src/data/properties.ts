@@ -1,155 +1,440 @@
 import { Property } from '../types';
+import { getPriceRange } from '../utils/pricing';
+import { 
+  Hotel, 
+  Room, 
+  ImageRecord,
+  getFeaturedHotels, 
+  getHotelsByDestination, 
+  getRoomsByHotel,
+  getAllUniqueHotels,
+  getHotelByPlaceId,
+  getRoomsByPlaceId,
+  getImagesByPlaceId
+} from '../lib/supabase-queries';
+import { supabase } from '../lib/supabase';
 
-export const properties: Property[] = [
-  {
-    id: 1,
-    name: "The Ritz-Carlton, San Francisco",
-    location: "Nob Hill, San Francisco",
-    city: "San Francisco",
-    description: "Perched atop Nob Hill, this luxury hotel offers stunning city and bay views with spacious family suites. Experience San Francisco's charm with easy access to cable cars, Chinatown, and Fisherman's Wharf.",
-    price: 599,
-    rating: 4.8,
-    reviews: 246,
-    images: [
+// Simple memory cache for development speed
+const cache = new Map();
+const CACHE_TIME = 3 * 60 * 1000; // 3 minutes
+
+// Adapter function to convert Supabase Hotel to Property with enhanced image support
+function hotelToProperty(hotel: Hotel, rooms: Room[] = [], images: ImageRecord[] = []): Property {
+  // Convert room data to RoomType format
+  const roomTypes = rooms.map((room, index) => {
+    const price = room.price_example ? parseInt(room.price_example.replace(/[^\d]/g, '')) || 299 : 299;
+    return {
+      id: parseInt(room.id.substring(0, 8), 16), // Keep as number for room types
+      name: room.room_type || 'Standard Room',
+      description: room.notes || '',
+      capacity: room.sleeps_estimate || 2,
+      bedType: room.bed_configuration || '1 King',
+      priceRange: getPriceRange(price),
+      image: "https://images.pexels.com/photos/271624/pexels-photo-271624.jpeg" // Default image
+    };
+  });
+
+  // Build images array from multiple sources
+  let propertyImages: string[] = [];
+
+  // First, try to use images from your uploaded images table
+  if (images && images.length > 0) {
+    images.forEach(imageRecord => {
+      // Add primary image
+      if (imageRecord.primary_image) {
+        propertyImages.push(imageRecord.primary_image);
+      }
+      
+      // Add secondary image
+      if (imageRecord.secondary_image) {
+        propertyImages.push(imageRecord.secondary_image);
+      }
+      
+      // Add gallery images (stored as JSON array)
+      if (imageRecord.gallery_images) {
+        try {
+          const galleryImages = JSON.parse(imageRecord.gallery_images);
+          if (Array.isArray(galleryImages)) {
+            propertyImages.push(...galleryImages);
+          }
+        } catch (e) {
+          console.warn('Failed to parse gallery_images JSON:', e);
+        }
+      }
+      
+      // Add all images (stored as JSON array)
+      if (imageRecord.all_images) {
+        try {
+          const allImages = JSON.parse(imageRecord.all_images);
+          if (Array.isArray(allImages)) {
+            propertyImages.push(...allImages);
+          }
+        } catch (e) {
+          console.warn('Failed to parse all_images JSON:', e);
+        }
+      }
+    });
+  }
+
+  // Fallback to hotel.image_urls if no images from images table
+  if (propertyImages.length === 0 && hotel.image_urls) {
+    try {
+      const parsedImages = JSON.parse(hotel.image_urls);
+      if (Array.isArray(parsedImages)) {
+        propertyImages = parsedImages;
+      }
+    } catch (e) {
+      console.warn('Failed to parse hotel.image_urls JSON:', e);
+    }
+  }
+
+  // Final fallback to default images
+  if (propertyImages.length === 0) {
+    propertyImages = [
       "https://images.pexels.com/photos/338504/pexels-photo-338504.jpeg",
       "https://images.pexels.com/photos/261102/pexels-photo-261102.jpeg",
       "https://images.pexels.com/photos/2034335/pexels-photo-2034335.jpeg",
       "https://images.pexels.com/photos/261156/pexels-photo-261156.jpeg"
+    ];
+  }
+
+  const propertyPrice = roomTypes[0]?.priceRange ?
+    (roomTypes[0].priceRange === 'budget' ? 150 :
+     roomTypes[0].priceRange === 'moderate' ? 300 :
+     roomTypes[0].priceRange === 'premium' ? 550 : 800) : 299;
+
+  return {
+    id: hotel.place_id || hotel.id, // Use place_id as the main ID for consistency
+    name: hotel.property_name || hotel.hotel_name || 'Unnamed Hotel',
+    location: hotel.neighborhood || hotel.address || hotel.city || 'Location TBD',
+    city: hotel.city || 'Unknown City',
+    description: hotel.room_notes || `Experience ${hotel.property_name || hotel.hotel_name || 'this hotel'} in ${hotel.city || 'this destination'}`,
+    price: propertyPrice,
+    priceRange: getPriceRange(propertyPrice),
+    rating: hotel.review_score || 4.5,
+    reviews: hotel.review_count || 50,
+    images: propertyImages,
+    amenities: hotel.tags ? hotel.tags.split(',').map(tag => tag.trim()) : [
+      "Free WiFi",
+      "Family Friendly",
+      "Room Service"
+    ],
+    roomTypes: roomTypes.length > 0 ? roomTypes : [{
+      id: 101,
+      name: "Standard Room",
+      description: "Comfortable accommodation for families",
+      capacity: 4,
+      bedType: "1 King + Sofa Bed",
+      priceRange: getPriceRange(299),
+      image: propertyImages[0] || "https://images.pexels.com/photos/271624/pexels-photo-271624.jpeg"
+    }],
+    perks: hotel.family_deal_available ? [
+      "Family Deals Available",
+      "Kids Welcome",
+      "Free WiFi"
+    ] : ["Free WiFi", "Family Friendly"],
+    featured: hotel.featured || false
+  };
+}
+
+// Async functions to replace the static data
+export async function getProperties(): Promise<Property[]> {
+  try {
+    // Check cache first
+    const cacheKey = 'all-properties';
+    const cached = cache.get(cacheKey);
+    
+    if (cached && Date.now() - cached.timestamp < CACHE_TIME) {
+      console.log('Using cached properties');
+      return cached.data;
+    }
+
+    // Get all unique hotels by place_id from Supabase
+    const hotels = await getAllUniqueHotels();
+    
+    if (!hotels || hotels.length === 0) {
+      console.log('No hotels found, using fallback');
+      return fallbackProperties;
+    }
+    
+    console.log(`Fetched ${hotels.length} unique hotels from Supabase`);
+    console.log('First hotel sample:', hotels[0]);
+    console.log('Hotel fields available:', hotels[0] ? Object.keys(hotels[0]) : 'No hotels');
+    
+    const properties: Property[] = [];
+    
+    for (const hotel of hotels) {
+      if (hotel.place_id) {
+        const rooms = await getRoomsByPlaceId(hotel.place_id);
+        const images = await getImagesByPlaceId(hotel.place_id);
+        properties.push(hotelToProperty(hotel, rooms, images));
+      }
+    }
+    
+    console.log(`Converted ${properties.length} unique properties`);
+    
+    // Cache the results
+    cache.set(cacheKey, { data: properties, timestamp: Date.now() });
+    
+    return properties;
+  } catch (error) {
+    console.error('Error fetching properties:', error);
+    return fallbackProperties; // Fallback to mock data if Supabase fails
+  }
+}
+
+export async function getPropertiesByCity(city: string): Promise<Property[]> {
+  try {
+    console.log(`Searching for hotels in: ${city}`);
+    
+    // Check cache first
+    const cacheKey = `city-${city.toLowerCase()}`;
+    const cached = cache.get(cacheKey);
+    
+    if (cached && Date.now() - cached.timestamp < CACHE_TIME) {
+      console.log(`Using cached properties for ${city}`);
+      return cached.data;
+    }
+    
+    // Search by multiple fields to catch all possible matches
+    const { data: hotels, error } = await supabase!
+      .from('hotels')
+      .select('*')
+      .or(`city.ilike.%${city}%,destination_slug.ilike.%${city.toLowerCase()}%,property_name.ilike.%${city}%,address.ilike.%${city}%`);
+    
+    if (error) {
+      console.error('Database error:', error);
+      return [];
+    }
+    
+    console.log(`Raw search results for ${city}:`, hotels);
+    console.log(`Found ${hotels?.length || 0} hotels for city: ${city}`);
+    
+    if (!hotels || hotels.length === 0) {
+      return [];
+    }
+    
+    const properties: Property[] = [];
+
+    for (const hotel of hotels) {
+      console.log(`Processing hotel:`, {
+        name: hotel.property_name || hotel.hotel_name,
+        city: hotel.city,
+        address: hotel.address
+      });
+
+      const rooms = hotel.place_id ? await getRoomsByHotel(hotel.place_id) : [];
+      const images = hotel.place_id ? await getImagesByPlaceId(hotel.place_id) : [];
+      properties.push(hotelToProperty(hotel, rooms, images));
+    }
+    
+    console.log(`Converted ${properties.length} properties for ${city}`);
+    
+    // Cache the results
+    cache.set(cacheKey, { data: properties, timestamp: Date.now() });
+    
+    return properties;
+  } catch (error) {
+    console.error('Error fetching properties by city:', error);
+    return [];
+  }
+}
+
+export async function getFeaturedProperties(): Promise<Property[]> {
+  return getProperties();
+}
+
+export async function getPropertyById(id: string): Promise<Property | undefined> {
+  try {
+    // If it's a mock ID, check fallback data first
+    if (id.startsWith('mock-')) {
+      console.log(`Looking for mock property: ${id}`);
+      const mockProperty = fallbackProperties.find(prop => prop.id === id);
+      if (mockProperty) {
+        console.log(`Found mock property: ${mockProperty.name}`);
+        return mockProperty;
+      }
+      console.log(`Mock property ${id} not found in fallback data`);
+    }
+
+    // Try Supabase for real IDs (now using place_id as primary identifier)
+    console.log(`Looking for property with place_id: ${id}`);
+    
+    // First try to get hotel by place_id
+    const hotel = await getHotelByPlaceId(id);
+    
+    if (!hotel) {
+      console.log(`Hotel not found by place_id: ${id}, trying by regular id`);
+      // Fallback to original id-based lookup
+      if (!supabase) {
+        console.log('Supabase client not available, using fallback data');
+        return fallbackProperties.find(prop => prop.id === id);
+      }
+
+      const { data: hotelById, error } = await supabase
+        .from('hotels')
+        .select('*')
+        .eq('id', id)
+        .single();
+      
+      if (error || !hotelById) {
+        console.log('Hotel not found by id either, checking fallback data');
+        return fallbackProperties.find(prop => prop.id === id);
+      }
+      
+      // Use the hotel found by id
+      const rooms = hotelById.place_id ? await getRoomsByPlaceId(hotelById.place_id) : [];
+      const images = hotelById.place_id ? await getImagesByPlaceId(hotelById.place_id) : [];
+      return hotelToProperty(hotelById, rooms, images);
+    }
+    
+    console.log(`Found hotel by place_id: ${hotel.property_name || hotel.hotel_name}`);
+    
+    // Get rooms and images for this hotel using place_id
+    const rooms = await getRoomsByPlaceId(id);
+    const images = await getImagesByPlaceId(id);
+    
+    return hotelToProperty(hotel, rooms, images);
+  } catch (error) {
+    console.error('Error fetching property by id:', error);
+    // Final fallback to mock data
+    return fallbackProperties.find(prop => prop.id === id);
+  }
+}
+
+// Keep original mock data as fallback
+const fallbackProperties: Property[] = [
+  {
+    id: "mock-1",
+    name: "Pali Hotel Hollywood",
+    location: "Hollywood, Los Angeles",
+    city: "Los Angeles",
+    description: "Mid-century modern design meets family comfort in the heart of Hollywood",
+    price: 380,
+    rating: 4.6,
+    reviews: 189,
+    images: [
+      "/fonts/02_pali_hwood_property-1-scaled.jpg",
+      "/fonts/220419_palihotel_hollywood_c02_watercolor.jpg",
+      "/fonts/25_pali_hollywood room.jpg",
+      "https://images.pexels.com/photos/261156/pexels-photo-261156.jpeg"
     ],
     amenities: [
-      "Kids Club",
-      "Family Pool",
-      "Playground",
-      "Game Room",
-      "Family Dining",
-      "Free WiFi",
-      "Babysitting Services"
+      "Connecting rooms available",
+      "Pool deck",
+      "Family-friendly dining",
+      "Rollaway beds",
+      "Cribs available",
+      "Kid-friendly amenities",
+      "Free WiFi"
     ],
     roomTypes: [
       {
         id: 101,
         name: "Family Suite",
-        description: "Spacious suite with separate kids room and city views",
-        capacity: 5,
-        bedType: "1 King, 2 Twin + Sofa Bed",
-        price: 599,
-        image: "https://images.pexels.com/photos/271624/pexels-photo-271624.jpeg"
-      },
-      {
-        id: 102,
-        name: "Deluxe Connecting Rooms",
-        description: "Two connecting rooms perfect for larger families",
-        capacity: 6,
-        bedType: "2 Queen + 2 Twin",
-        price: 749,
-        image: "https://images.pexels.com/photos/271619/pexels-photo-271619.jpeg"
+        description: "Spacious suite with connecting rooms and Hollywood views",
+        capacity: 4,
+        bedType: "1 King + Rollaway bed",
+        priceRange: 'moderate',
+        image: "/fonts/25_pali_hollywood room.jpg"
       }
     ],
     perks: [
-      "Kids Stay Free",
-      "Complimentary Breakfast",
-      "Free Airport Shuttle",
-      "Welcome Gift for Children"
+      "Rollaway beds",
+      "Cribs available",
+      "Kid-friendly amenities",
+      "Hollywood location"
     ],
     featured: true
   },
   {
-    id: 2,
-    name: "Hotel Zephyr San Francisco",
-    location: "Fisherman's Wharf, San Francisco",
-    city: "San Francisco",
-    description: "A nautical-themed boutique hotel on the waterfront with playful design and family-friendly amenities. Perfect for exploring Pier 39, Alcatraz, and the Golden Gate Bridge.",
-    price: 349,
-    rating: 4.6,
-    reviews: 189,
+    id: "mock-2",
+    name: "Petit Pali Ocean",
+    location: "Carmel-by-the-Sea",
+    city: "Carmel-by-the-Sea",
+    description: "Coastal elegance with stunning ocean views and family-first service",
+    price: 450,
+    rating: 4.7,
+    reviews: 156,
     images: [
-      "https://images.pexels.com/photos/208745/pexels-photo-208745.jpeg",
-      "https://images.pexels.com/photos/5971874/pexels-photo-5971874.jpeg",
-      "https://images.pexels.com/photos/2662116/pexels-photo-2662116.jpeg",
+      "/fonts/petit pali ocean pic.jpg",
+      "/fonts/le petit pali ocean deluxekingfireplace room .jpg",
+      "/fonts/petit pali ocean lobby 49_lpp_carmel_property-1689705039482.jpg",
       "https://images.pexels.com/photos/2440471/pexels-photo-2440471.jpeg"
     ],
     amenities: [
-      "Indoor Heated Pool",
-      "Kid-friendly Activities",
-      "Game Room",
-      "Children's Play Area",
-      "Family Movie Nights",
-      "Bike Rentals",
-      "Waterfront Views"
+      "Ocean views",
+      "Fireplace suites",
+      "Beach access",
+      "Beach equipment",
+      "Family concierge",
+      "Ocean-view rooms",
+      "Free WiFi"
     ],
     roomTypes: [
       {
         id: 201,
-        name: "Nautical Family Room",
-        description: "Themed room with bunk beds and harbor views",
-        capacity: 4,
-        bedType: "1 King + Bunk Beds",
-        price: 349,
-        image: "https://images.pexels.com/photos/775219/pexels-photo-775219.jpeg"
+        name: "Ocean Deluxe King",
+        description: "Elegant room with fireplace and stunning ocean views",
+        capacity: 3,
+        bedType: "1 King + Sofa bed",
+        priceRange: 'premium',
+        image: "/fonts/le petit pali ocean deluxekingfireplace room .jpg"
       }
     ],
     perks: [
-      "Free Bike Rentals",
-      "Complimentary Hot Chocolate",
-      "Kids Activity Kit",
-      "Harbor View Guarantee"
+      "Beach equipment",
+      "Family concierge",
+      "Ocean-view rooms",
+      "Fireplace suites"
     ],
     featured: true
   },
   {
-    id: 3,
-    name: "The Plaza Hotel",
-    location: "Fifth Avenue, New York",
-    city: "New York",
-    description: "An iconic luxury hotel in the heart of Manhattan, offering elegant family suites with Central Park views. Experience the magic of New York with world-class shopping, dining, and Broadway shows at your doorstep.",
-    price: 899,
-    rating: 4.9,
-    reviews: 315,
+    id: "mock-3",
+    name: "The Surfjack",
+    location: "Waikiki, Honolulu",
+    city: "Honolulu",
+    description: "Retro Hawaiian vibes with modern family amenities in paradise",
+    price: 520,
+    rating: 4.5,
+    reviews: 203,
     images: [
-      "https://images.pexels.com/photos/466685/pexels-photo-466685.jpeg",
-      "https://images.pexels.com/photos/248837/pexels-photo-248837.jpeg",
-      "https://images.pexels.com/photos/2360673/pexels-photo-2360673.jpeg",
+      "/fonts/surfjack lobby.jpeg",
+      "/fonts/surf jack 1-bedroom-suite-living-area.jpg",
+      "/fonts/surfjack sur_1-room_suite.jpg",
       "https://images.pexels.com/photos/164595/pexels-photo-164595.jpeg"
     ],
     amenities: [
-      "Central Park Views",
-      "Kids Concierge",
-      "Family Dining",
-      "Spa Services",
-      "Shopping Access",
-      "Broadway Tickets",
-      "Museum Partnerships"
+      "Pool with swim-up bar",
+      "Hawaiian design",
+      "Waikiki location",
+      "Separate living area",
+      "Kitchenette",
+      "Pool access",
+      "Free WiFi"
     ],
     roomTypes: [
       {
-        id: 301,
-        name: "Central Park Suite",
-        description: "Luxurious suite overlooking Central Park with separate living area",
+        id: 201,
+        name: "1-Bedroom Suite",
+        description: "Spacious suite with separate living area and Hawaiian design touches",
         capacity: 4,
-        bedType: "1 King + 2 Twin",
-        price: 899,
-        image: "https://images.pexels.com/photos/3555614/pexels-photo-3555614.jpeg"
-      },
-      {
-        id: 302,
-        name: "Family Penthouse",
-        description: "Spacious penthouse with multiple bedrooms and panoramic city views",
-        capacity: 6,
-        bedType: "2 King + 2 Twin",
-        price: 1299,
-        image: "https://images.pexels.com/photos/172872/pexels-photo-172872.jpeg"
+        bedType: "1 King + Sofa bed",
+        priceRange: 'premium',
+        image: "/fonts/surf jack 1-bedroom-suite-living-area.jpg"
       }
     ],
     perks: [
-      "Eloise Welcome Package",
-      "Central Park Picnic Basket",
-      "Broadway Show Discounts",
-      "Personal Shopping Service"
+      "Separate living area",
+      "Kitchenette",
+      "Pool access",
+      "Hawaiian experience"
     ],
     featured: true
   },
   {
-    id: 4,
+    id: "mock-4",
     name: "Pod Hotels Times Square",
     location: "Times Square, New York",
     city: "New York",
@@ -174,12 +459,12 @@ export const properties: Property[] = [
     ],
     roomTypes: [
       {
-        id: 401,
+        id: 201,
         name: "Family Pod",
         description: "Cleverly designed room with bunk beds and city views",
         capacity: 4,
         bedType: "1 Queen + Bunk Beds",
-        price: 299,
+        priceRange: 'moderate',
         image: "https://images.pexels.com/photos/1838554/pexels-photo-1838554.jpeg"
       }
     ],
@@ -192,7 +477,7 @@ export const properties: Property[] = [
     featured: true
   },
   {
-    id: 5,
+    id: "mock-5",
     name: "The Langham, London",
     location: "Regent Street, London",
     city: "London",
@@ -217,21 +502,21 @@ export const properties: Property[] = [
     ],
     roomTypes: [
       {
-        id: 501,
+        id: 201,
         name: "Family Suite",
         description: "Elegant suite with separate children's area and city views",
         capacity: 4,
         bedType: "1 King + 2 Twin",
-        price: 649,
+        priceRange: 'premium',
         image: "https://images.pexels.com/photos/1457842/pexels-photo-1457842.jpeg"
       },
       {
-        id: 502,
+        id: 202,
         name: "Regent Suite",
         description: "Luxurious two-bedroom suite with panoramic London views",
         capacity: 6,
         bedType: "1 King, 2 Queen",
-        price: 899,
+        priceRange: 'luxury',
         image: "https://images.pexels.com/photos/1643383/pexels-photo-1643383.jpeg"
       }
     ],
@@ -244,7 +529,7 @@ export const properties: Property[] = [
     featured: true
   },
   {
-    id: 6,
+    id: "mock-6",
     name: "Zetter Townhouse Marylebone",
     location: "Marylebone, London",
     city: "London",
@@ -269,12 +554,12 @@ export const properties: Property[] = [
     ],
     roomTypes: [
       {
-        id: 601,
+        id: 201,
         name: "Family Townhouse Room",
         description: "Cozy room with British charm and modern family amenities",
         capacity: 4,
         bedType: "1 King + 2 Twin",
-        price: 399,
+        priceRange: 'moderate',
         image: "https://images.pexels.com/photos/4915847/pexels-photo-4915847.jpeg"
       }
     ],
@@ -287,7 +572,7 @@ export const properties: Property[] = [
     featured: true
   },
   {
-    id: 7,
+    id: "mock-7",
     name: "Aman Tokyo",
     location: "Otemachi, Tokyo",
     city: "Tokyo",
@@ -312,21 +597,21 @@ export const properties: Property[] = [
     ],
     roomTypes: [
       {
-        id: 701,
+        id: 201,
         name: "Deluxe Family Room",
         description: "Spacious room with traditional tatami area and modern amenities",
         capacity: 4,
         bedType: "1 King + Traditional Futon",
-        price: 1299,
+        priceRange: 'luxury',
         image: "https://images.pexels.com/photos/775219/pexels-photo-775219.jpeg"
       },
       {
-        id: 702,
+        id: 202,
         name: "Family Suite",
         description: "Two-room suite with separate living area and city views",
         capacity: 6,
         bedType: "2 King + Traditional Futon",
-        price: 1699,
+        priceRange: 'luxury',
         image: "https://images.pexels.com/photos/584399/living-room-couch-interior-room-584399.jpeg"
       }
     ],
@@ -339,7 +624,7 @@ export const properties: Property[] = [
     featured: true
   },
   {
-    id: 8,
+    id: "mock-8",
     name: "Hotel Gracery Shinjuku",
     location: "Shinjuku, Tokyo",
     city: "Tokyo",
@@ -364,12 +649,12 @@ export const properties: Property[] = [
     ],
     roomTypes: [
       {
-        id: 801,
+        id: 201,
         name: "Family Room",
         description: "Modern room with city views and space for the whole family",
         capacity: 4,
         bedType: "2 Queen Beds",
-        price: 299,
+        priceRange: 'moderate',
         image: "https://images.pexels.com/photos/1838554/pexels-photo-1838554.jpeg"
       }
     ],
@@ -383,14 +668,7 @@ export const properties: Property[] = [
   }
 ];
 
-export const getPropertyById = (id: number): Property | undefined => {
-  return properties.find(property => property.id === id);
-};
+// Legacy sync functions for backward compatibility (now return promises)
+export const properties = fallbackProperties; // Keep for immediate fallback
 
-export const getPropertiesByCity = (city: string): Property[] => {
-  return properties.filter(property => property.city.toLowerCase() === city.toLowerCase());
-};
-
-export const getFeaturedProperties = (): Property[] => {
-  return properties.filter(property => property.featured);
-};
+// Note: Components using these functions will need to be updated to handle async
