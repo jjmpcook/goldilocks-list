@@ -1,15 +1,30 @@
 import React, { useState } from 'react';
 import Layout from '../components/common/Layout';
 import { Mail, Send } from 'lucide-react';
+import { submitWaitlistEmail } from '../lib/supabase-queries';
 
 const Waitlist: React.FC = () => {
   const [email, setEmail] = useState('');
   const [submitted, setSubmitted] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Here you would typically handle the email submission to your backend
-    setSubmitted(true);
+    setLoading(true);
+    setError(null);
+    try {
+      await submitWaitlistEmail(email);
+      setSubmitted(true);
+    } catch (err: any) {
+      if (err.message === 'already_subscribed') {
+        setError('You\'re already on the list! We\'ll be in touch soon.');
+      } else {
+        setError('Something went wrong. Please try again.');
+      }
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -47,12 +62,24 @@ const Waitlist: React.FC = () => {
                     />
                   </div>
                   
+                  {error && (
+                    <p className="text-red-600 text-sm text-center">{error}</p>
+                  )}
+
                   <button
                     type="submit"
-                    className="w-full bg-amber-600 text-white py-3 rounded-lg hover:bg-amber-700 transition-colors flex items-center justify-center"
+                    disabled={loading}
+                    className="w-full bg-amber-600 text-white py-3 rounded-lg hover:bg-amber-700 transition-colors flex items-center justify-center disabled:opacity-60 disabled:cursor-not-allowed"
                   >
-                    <Send className="w-5 h-5 mr-2" />
-                    Join Waitlist
+                    {loading ? (
+                      <svg className="animate-spin w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                      </svg>
+                    ) : (
+                      <Send className="w-5 h-5 mr-2" />
+                    )}
+                    {loading ? 'Joining...' : 'Join Waitlist'}
                   </button>
                 </form>
                 
