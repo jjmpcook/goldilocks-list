@@ -19,7 +19,7 @@ export const useFavorites = () => {
   }, [user])
 
   const loadFavorites = async () => {
-    if (!user) return
+    if (!user || !supabase) return
 
     setLoading(true)
     try {
@@ -42,6 +42,7 @@ export const useFavorites = () => {
   const addFavorite = async (propertyId: number) => {
     if (user) {
       // Add to Supabase for authenticated users
+      if (!supabase) return
       try {
         const { error } = await supabase
           .from('user_favorites')
@@ -67,6 +68,7 @@ export const useFavorites = () => {
   const removeFavorite = async (propertyId: number) => {
     if (user) {
       // Remove from Supabase for authenticated users
+      if (!supabase) return
       try {
         const { error } = await supabase
           .from('user_favorites')
@@ -100,7 +102,7 @@ export const useFavorites = () => {
 
   // Migrate localStorage favorites to Supabase when user signs in
   const migrateFavoritesToSupabase = async () => {
-    if (!user) return
+    if (!user || !supabase) return
 
     const localFavorites = localStorage.getItem('favorites')
     if (localFavorites) {

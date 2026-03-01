@@ -1,13 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import Layout from '../components/common/Layout';
-import { Heart, MapPin, Star, Eye, Filter, Grid, List, Search } from 'lucide-react';
-import { properties } from '../data/properties';
+import { Heart, MapPin, Star, Eye, Filter, Grid, List, Search, AlertCircle } from 'lucide-react';
+import { getProperties } from '../data/properties';
 import { useFavorites } from '../hooks/useFavorites';
 import { Property } from '../types';
 
 const BrowseGallery: React.FC = () => {
-  const [filteredProperties, setFilteredProperties] = useState<Property[]>(properties);
+  const [allProperties, setAllProperties] = useState<Property[]>([]);
+  const [filteredProperties, setFilteredProperties] = useState<Property[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'masonry'>('masonry');
   const [filterCity, setFilterCity] = useState<string>('all');
   const [filterPriceRange, setFilterPriceRange] = useState<string>('all');
@@ -15,7 +18,6 @@ const BrowseGallery: React.FC = () => {
   const [showFilters, setShowFilters] = useState(false);
   const { isFavorite, toggleFavorite } = useFavorites();
 
-  const cities = Array.from(new Set(properties.map(p => p.city)));
   const priceRanges = [
     { label: 'Under $300', value: '0-300' },
     { label: '$300 - $500', value: '300-500' },
@@ -23,8 +25,29 @@ const BrowseGallery: React.FC = () => {
     { label: '$800+', value: '800-9999' }
   ];
 
+  // Fetch all properties from Supabase on mount
   useEffect(() => {
-    let filtered = properties;
+    const fetchProperties = async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const data = await getProperties();
+        setAllProperties(data);
+        setFilteredProperties(data);
+      } catch (err) {
+        console.error('Error loading properties:', err);
+        setError('Failed to load hotels. Please try again.');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchProperties();
+  }, []);
+
+  // Re-run filters whenever data or any filter value changes
+  useEffect(() => {
+    let filtered = allProperties;
 
     // Filter by city
     if (filterCity !== 'all') {
@@ -39,31 +62,41 @@ const BrowseGallery: React.FC = () => {
 
     // Filter by search term
     if (searchTerm) {
-      filtered = filtered.filter(p => 
-        p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        p.location.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        p.city.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        p.description.toLowerCase().includes(searchTerm.toLowerCase())
+      const lower = searchTerm.toLowerCase();
+      filtered = filtered.filter(p =>
+        p.name.toLowerCase().includes(lower) ||
+        p.location.toLowerCase().includes(lower) ||
+        p.city.toLowerCase().includes(lower) ||
+        p.description.toLowerCase().includes(lower)
       );
     }
 
     setFilteredProperties(filtered);
-  }, [filterCity, filterPriceRange, searchTerm]);
+  }, [allProperties, filterCity, filterPriceRange, searchTerm]);
+
+  // Derive city list from live data
+  const cities = Array.from(new Set(allProperties.map(p => p.city)));
+
+  const clearFilters = () => {
+    setFilterCity('all');
+    setFilterPriceRange('all');
+    setSearchTerm('');
+  };
 
   const PropertyCard: React.FC<{ property: Property; className?: string }> = ({ property, className = '' }) => {
     const favorited = isFavorite(property.id);
-    
+
     return (
       <div className={`group relative bg-white rounded-xl shadow-sm hover:shadow-lg transition-all duration-300 overflow-hidden ${className}`}>
         <div className="relative">
           <Link to={`/property/${property.id}`}>
-            <img 
-              src={property.images[0]} 
+            <img
+              src={property.images[0]}
               alt={property.name}
               className="w-full h-48 sm:h-56 md:h-64 object-cover group-hover:scale-105 transition-transform duration-500"
             />
           </Link>
-          
+
           {/* Overlay with quick actions */}
           <div className="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-20 transition-all duration-300 flex items-center justify-center">
             <div className="opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex space-x-3">
@@ -79,8 +112,8 @@ const BrowseGallery: React.FC = () => {
                   toggleFavorite(property.id);
                 }}
                 className={`p-2 rounded-full shadow-lg transition-colors ${
-                  favorited 
-                    ? 'bg-rose-500 text-white hover:bg-rose-600' 
+                  favorited
+                    ? 'bg-rose-500 text-white hover:bg-rose-600'
                     : 'bg-white text-gray-800 hover:bg-gray-50'
                 }`}
               >
@@ -101,8 +134,8 @@ const BrowseGallery: React.FC = () => {
               toggleFavorite(property.id);
             }}
             className={`absolute top-3 right-3 p-2 rounded-full shadow-sm transition-all md:opacity-0 md:group-hover:opacity-100 ${
-              favorited 
-                ? 'bg-rose-500 text-white' 
+              favorited
+                ? 'bg-rose-500 text-white'
                 : 'bg-white bg-opacity-90 text-gray-700 hover:bg-opacity-100'
             }`}
           >
@@ -116,7 +149,7 @@ const BrowseGallery: React.FC = () => {
               {property.name}
             </h3>
           </Link>
-          
+
           <div className="flex items-center text-gray-600 mb-2">
             <MapPin className="w-4 h-4 mr-1 flex-shrink-0" />
             <span className="text-sm truncate">{property.location}</span>
@@ -164,7 +197,7 @@ const BrowseGallery: React.FC = () => {
               <p className="text-xl text-gray-600 mb-8">
                 Discover your perfect family getaway. Save your favorites and start planning your next adventure.
               </p>
-              
+
               {/* Search Bar */}
               <div className="relative max-w-xl mx-auto mb-6">
                 <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
@@ -192,9 +225,9 @@ const BrowseGallery: React.FC = () => {
                   <Filter className="w-4 h-4 mr-2" />
                   Filters
                 </button>
-                
+
                 <span className="text-sm text-gray-600">
-                  {filteredProperties.length} hotels found
+                  {loading ? 'Loading...' : `${filteredProperties.length} hotels found`}
                 </span>
               </div>
 
@@ -252,11 +285,7 @@ const BrowseGallery: React.FC = () => {
 
                   <div className="flex items-end">
                     <button
-                      onClick={() => {
-                        setFilterCity('all');
-                        setFilterPriceRange('all');
-                        setSearchTerm('');
-                      }}
+                      onClick={clearFilters}
                       className="w-full px-4 py-2 text-gray-600 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
                     >
                       Clear Filters
@@ -270,44 +299,63 @@ const BrowseGallery: React.FC = () => {
 
         {/* Gallery */}
         <div className="container mx-auto px-4 py-8">
-          {viewMode === 'masonry' ? (
-            <div className="columns-1 sm:columns-2 lg:columns-3 xl:columns-4 gap-6 space-y-6">
-              {filteredProperties.map((property, index) => (
-                <PropertyCard 
-                  key={property.id} 
-                  property={property} 
-                  className="break-inside-avoid"
-                />
-              ))}
+          {loading ? (
+            <div className="text-center py-24">
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-amber-600 mx-auto mb-4"></div>
+              <p className="text-gray-600">Loading hotels...</p>
             </div>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-              {filteredProperties.map((property) => (
-                <PropertyCard key={property.id} property={property} />
-              ))}
-            </div>
-          )}
-
-          {filteredProperties.length === 0 && (
-            <div className="text-center py-12">
-              <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                <Search className="w-8 h-8 text-gray-400" />
+          ) : error ? (
+            <div className="text-center py-24">
+              <div className="w-16 h-16 bg-red-50 rounded-full flex items-center justify-center mx-auto mb-4">
+                <AlertCircle className="w-8 h-8 text-red-400" />
               </div>
-              <h3 className="text-xl font-medium text-gray-800 mb-2">No hotels found</h3>
-              <p className="text-gray-600 mb-6">
-                Try adjusting your filters or search terms to find more results.
-              </p>
+              <h3 className="text-xl font-medium text-gray-800 mb-2">Something went wrong</h3>
+              <p className="text-gray-600 mb-6">{error}</p>
               <button
-                onClick={() => {
-                  setFilterCity('all');
-                  setFilterPriceRange('all');
-                  setSearchTerm('');
-                }}
+                onClick={() => window.location.reload()}
                 className="px-6 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors"
               >
-                Clear All Filters
+                Try Again
               </button>
             </div>
+          ) : (
+            <>
+              {viewMode === 'masonry' ? (
+                <div className="columns-1 sm:columns-2 lg:columns-3 xl:columns-4 gap-6 space-y-6">
+                  {filteredProperties.map((property) => (
+                    <PropertyCard
+                      key={property.id}
+                      property={property}
+                      className="break-inside-avoid"
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                  {filteredProperties.map((property) => (
+                    <PropertyCard key={property.id} property={property} />
+                  ))}
+                </div>
+              )}
+
+              {filteredProperties.length === 0 && (
+                <div className="text-center py-12">
+                  <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <Search className="w-8 h-8 text-gray-400" />
+                  </div>
+                  <h3 className="text-xl font-medium text-gray-800 mb-2">No hotels found</h3>
+                  <p className="text-gray-600 mb-6">
+                    Try adjusting your filters or search terms to find more results.
+                  </p>
+                  <button
+                    onClick={clearFilters}
+                    className="px-6 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors"
+                  >
+                    Clear All Filters
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
 
@@ -329,10 +377,10 @@ const BrowseGallery: React.FC = () => {
                 View My Wishlist
               </Link>
               <Link
-                to="/hotel-match"
+                to="/booking"
                 className="inline-flex items-center justify-center px-6 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
               >
-                Get Expert Recommendations
+                Book Your Stay
               </Link>
             </div>
           </div>

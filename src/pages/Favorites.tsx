@@ -1,10 +1,11 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import Layout from '../components/common/Layout';
 import PropertyCard from '../components/common/PropertyCard';
 import AuthModal from '../components/auth/AuthModal';
 import { useFavorites } from '../hooks/useFavorites';
 import { useAuth } from '../contexts/AuthContext';
 import { getPropertyById } from '../data/properties';
+import { Property } from '../types';
 import { Heart, LogIn } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import Button from '../components/common/Button';
@@ -12,11 +13,30 @@ import Button from '../components/common/Button';
 const Favorites: React.FC = () => {
   const { user } = useAuth();
   const { favorites, loading } = useFavorites();
-  const [isAuthModalOpen, setIsAuthModalOpen] = React.useState(false);
-  
-  const favoriteProperties = favorites
-    .map(id => getPropertyById(id))
-    .filter(property => property !== undefined);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [favoriteProperties, setFavoriteProperties] = useState<Property[]>([]);
+  const [propertiesLoading, setPropertiesLoading] = useState(false);
+
+  useEffect(() => {
+    if (loading || favorites.length === 0) {
+      setFavoriteProperties([]);
+      return;
+    }
+
+    const fetchProperties = async () => {
+      setPropertiesLoading(true);
+      try {
+        const results = await Promise.all(
+          favorites.map(id => getPropertyById(String(id)))
+        );
+        setFavoriteProperties(results.filter((p): p is Property => p !== undefined));
+      } finally {
+        setPropertiesLoading(false);
+      }
+    };
+
+    fetchProperties();
+  }, [favorites, loading]);
 
   if (!user) {
     return (
@@ -48,7 +68,7 @@ const Favorites: React.FC = () => {
     );
   }
 
-  if (loading) {
+  if (loading || propertiesLoading) {
     return (
       <Layout>
         <div className="container mx-auto px-4 py-12">
@@ -78,7 +98,7 @@ const Favorites: React.FC = () => {
             
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
               {favoriteProperties.map(property => (
-                property && <PropertyCard key={property.id} property={property} />
+                <PropertyCard key={property.id} property={property} />
               ))}
             </div>
           </>
